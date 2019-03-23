@@ -10,14 +10,14 @@ import org.jetbrains.bio.CompressionType
 import org.jetbrains.bio.big._
 
 import scala.collection.JavaConverters._
+import scala.io.Source
 
 
 object Main {
 
   val dbName = "bdgeek"
   val bamTableName = "reads"
-  // FIXME: Read chromosome length from file
-  val chromosomeLengthMap: Map[String, Int] = Map("11" -> 134452384, "20" -> 62435965)
+  var chromosomeLengthMap: Map[String, Int] = _
   val sequila: SequilaSession = configureSequilaSession
 
 
@@ -30,6 +30,9 @@ object Main {
     val coverageThreshold = args(3).toInt
     val lowCoverageRatioThreshold = args(4).toDouble
     val outputDirectory = Paths.get(args(5))
+    val chromosomeLengthPath = Paths.get(args(6))
+
+    chromosomeLengthMap = readChromosomeLengths(chromosomeLengthPath)
 
     outputDirectory.toFile.mkdirs()
     val coverageDS = prepareCoverageDS(bamLocation, sampleName, coverageThreshold).cache
@@ -39,6 +42,10 @@ object Main {
     val lowCoveredGenesByChromosome = lowCoveredGeneDS.rdd.groupBy(_.chromosome).collect
     writePartiallyLowCoveredGenes(lowCoveredGenesByChromosome, outputDirectory)
     writeEntirelyLowCoveredGenes(lowCoveredGenesByChromosome, outputDirectory)
+  }
+
+  def readChromosomeLengths(chrFilePath: Path): Map[String, Int] = {
+      Source.fromFile(chrFilePath.toFile).getLines.map(_.split("\\s+")).map(p => p(0) -> p(1).toInt).toMap
   }
 
   def writeLowCoveredRegions(coverageDS: Dataset[IntervalCoverage], outputDirectory: Path): Unit = {
