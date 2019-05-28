@@ -1,6 +1,6 @@
 import java.nio.file.Paths
 
-import IntervalProcessor._
+import model._
 
 object CoverageMain {
   def main(args: Array[String]): Unit = {
@@ -11,15 +11,21 @@ object CoverageMain {
     val outputDirectory = Paths.get(args(4))
     val chromosomeLengthPath = Paths.get(args(5))
 
-    chromosomeLengthMap = readChromosomeLengths(chromosomeLengthPath)
+    val processor = new IntervalProcessor(chromosomeLengthPath)
+
+    import processor.sequila.implicits._
 
     outputDirectory.toFile.mkdirs()
-    val coverageDS = prepareCoverageDS(bamLocation, coverageThreshold).cache
-    writeLowCoveredRegions(coverageDS, outputDirectory)
-    val geneDS = prepareGeneDS(gtfLocation)
-    val lowCoveredGeneDS = filterGenesWithLowCoverage(coverageDS, geneDS, lowCoverageRatioThreshold)
+    val sampleDSList = processor.prepareLowCoverageSamples(bamLocation, coverageThreshold)
+      .map(p => (p._1.cache.as[SimpleInterval], p._2))
+    sampleDSList.foreach(p => processor.writeLowCoveredRegions(p._1, p._2, outputDirectory))
+    val lowCoverageDS = processor.simpleRangeJoinList(sampleDSList.map(_._1)).cache()
+    lowCoverageDS.count()
+    sampleDSList.foreach(_._1.unpersist)
+    val geneDS = processor.prepareGeneDS(gtfLocation)
+    val lowCoveredGeneDS = processor.filterGenesWithLowCoverage(lowCoverageDS, geneDS, lowCoverageRatioThreshold)
     val lowCoveredGenesByStrandChromosome = lowCoveredGeneDS.rdd.groupBy(row => (row.strand, row.chromosome)).collect
-    writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome, outputDirectory)
-    writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome, outputDirectory)
+    processor.writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome, outputDirectory)
+    processor.writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome, outputDirectory)
   }
 }
