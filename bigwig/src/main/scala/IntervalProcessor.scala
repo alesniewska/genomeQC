@@ -1,3 +1,4 @@
+import java.io.PrintWriter
 import java.nio.file.Path
 
 import model._
@@ -9,7 +10,9 @@ import org.jetbrains.bio.big._
 
 import scala.collection.JavaConverters._
 
-class IntervalProcessor(chromosomeLengthPath: Path) {
+class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
+
+  val CHR_PREFIX = "chr"
 
   val dbName = "bdgeek"
   val bamTableName = "reads"
@@ -22,6 +25,14 @@ class IntervalProcessor(chromosomeLengthPath: Path) {
     val spark = SparkSession.builder()
       .getOrCreate()
     val ss = SequilaSession(spark)
+    ss.sqlContext.setConf("spark.biodatageeks.rangejoin.useJoinOrder","false")
+    ss.sqlContext.setConf("spark.biodatageeks.rangejoin.maxBroadcastSize", (128*1024*1024).toString)
+    ss.sqlContext.setConf("spark.biodatageeks.rangejoin.minOverlap","1")
+    ss.sqlContext.setConf("spark.biodatageeks.rangejoin.maxGap","0")
+    ss.sqlContext.setConf("spark.biodatageeks.bam.predicatePushdown","false")
+    ss.sqlContext.setConf("spark.biodatageeks.bam.useGKLInflate","false")
+    ss.sqlContext.setConf("spark.biodatageeks.bam.useSparkBAM","false")
+    ss.sqlContext.setConf("spark.sql.broadcastTimeout", "36000")
     SequilaRegister.register(ss)
     UDFRegister.register(ss)
     ss
@@ -32,19 +43,19 @@ class IntervalProcessor(chromosomeLengthPath: Path) {
     coverageDS.rdd.groupBy(_.contigName).collect
   }
 
-  def writeLowCoveredRegions(coverageDS: Dataset[SimpleInterval], sampleName: String, outputDirectory: Path): Unit = {
+  def writeLowCoveredRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
     val coverageByChromosome = collectByChromosome(coverageDS)
     val outputPath = outputDirectory.resolve(s"low_coverage_regions_$sampleName.bw")
     bigWigWriter.writeToBigWig(coverageByChromosome, outputPath)
   }
 
-  def writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])], outputDirectory: Path): Unit = {
+  def writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])]): Unit = {
     val coverageByStrandChromosome = toCoverageByChromosome(lowCoveredGenesByStrandChromosome)
     val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_genes_$strand.bw")
     bigWigWriter.writeTwoBigWigFiles(coverageByStrandChromosome, outputPathBuilder)
   }
 
-  def writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])], outputDirectory: Path): Unit = {
+  def writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])]): Unit = {
     val entirelyLowCoveredGenesByChromosome = lowCoveredGenesByStrandChromosome.map(p => (p._1, p._2.filter(cov => cov.lowCoverageLength == cov.geneLength)))
     val coverageByChromosome = toCoverageByChromosome(entirelyLowCoveredGenesByChromosome)
     val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_whole_genes_$strand.bw")
@@ -80,8 +91,23 @@ class IntervalProcessor(chromosomeLengthPath: Path) {
     val geneIdExpression = regexp_extract($"attributes", """.*gene_id\s"([^"]+)";""", 1).as("geneId")
     val geneDS = sequila.read.option("sep", "\t").option("comment", "#").schema(gtfSchema).csv(gtfLocation).
       select("seqname", "feature", "start", "end", "strand", "attributes").
-      filter($"feature" === "gene").select($"seqname".as("contigName"), $"start", $"end", $"strand", geneIdExpression).as[Gene]
+      filter($"feature" === "gene")
+      .select(withChrPrefix($"seqname").as("contigName"), $"start", $"end", $"strand", geneIdExpression)
+      .as[Gene]
     geneDS
+  }
+
+  def withChrPrefix(contigName: Column): Column = {
+    when(contigName.startsWith(CHR_PREFIX), contigName)
+      .otherwise(concat(lit(CHR_PREFIX), contigName))
+  }
+
+  def withChrPrefix(contigName: String): String = {
+    if (contigName.startsWith(CHR_PREFIX)) {
+      contigName
+    } else {
+      CHR_PREFIX + contigName
+    }
   }
 
   def filterGenesWithLowCoverage(coverageDS: Dataset[SimpleInterval], geneDS: Dataset[Gene], lowCoverageRatioThreshold: Double): Dataset[GeneCoverage] = {
@@ -90,19 +116,28 @@ class IntervalProcessor(chromosomeLengthPath: Path) {
     val geneWithLengthDS = geneDS.withColumn("geneLength", $"end" - $"start").as[Gene]
 
     val geneCoverageDS = rangeJoin(coverageDS, geneWithLengthDS).
-      orderBy($"covStart").withColumnRenamed("contigName", "chromosome").groupBy($"strand", $"geneId", $"chromosome").
-      agg(first($"geneLength"), sum($"end" - $"start").cast(IntegerType).as("lowCoverageLength"),
+      orderBy($"start").withColumnRenamed("contigName", "chromosome").groupBy($"strand", $"geneId", $"chromosome").
+      agg(first($"geneLength").as("geneLength"), sum($"end" - $"start").cast(IntegerType).as("lowCoverageLength"),
         collect_list(toIntervalUDF($"chromosome", $"start", $"end")).as("coverageList")).as[GeneCoverage]
     val lowGeneCoverageDS = geneCoverageDS.filter($"lowCoverageLength".geq($"geneLength" * lowCoverageRatioThreshold))
     lowGeneCoverageDS
   }
 
-  def loadBigWig(bigWigPath: Path): Dataset[SimpleInterval] = {
+  def loadMappabilityTrack(mappabilityPath: Path, mappabilityThreshold: Double): Dataset[SimpleInterval] = {
+    def mappabilityIntervals = loadBigWig(mappabilityPath)
+    def selectedIntervals = mappabilityIntervals.filter(_.annotation >= mappabilityThreshold)
+      .map(interval => SimpleInterval(interval.contigName, interval.start, interval.end)).toSeq
+    sequila.sparkContext.parallelize(selectedIntervals).toDS
+  }
+
+  def loadBigWig(bigWigPath: Path): Iterable[AnnotatedInterval] = {
     val bigWigFile = BigWigFile.read(bigWigPath, null)
     val sections = bigWigFile.getChromosomes.values.par.flatMap(chr => bigWigFile.query(chr.toString).asScala.flatMap(section =>
-      section.query.iterator().asScala.map(iv => SimpleInterval(section.getChrom, iv.getStart, iv.getEnd))
+      section.query.iterator().asScala.map(iv => {
+        AnnotatedInterval(withChrPrefix(section.getChrom), iv.getStart, iv.getEnd, iv.getScore)
+      })
     )).seq
-    sequila.sparkContext.parallelize(sections).toDS
+    sections
   }
 
 
@@ -124,11 +159,23 @@ class IntervalProcessor(chromosomeLengthPath: Path) {
 
   def simpleRangeJoinList(dsList: List[Dataset[_ <: ContigInterval]]): Dataset[SimpleInterval] = {
     val rangeJoinReduce = (firstDS: Dataset[SimpleInterval], secondDS: Dataset[SimpleInterval]) => {
-      rangeJoin(firstDS, secondDS).
-        //        withColumnRenamed("covStart", "start").
-        //        withColumnRenamed("covEnd", "end").
-        as[SimpleInterval]
+      rangeJoin(firstDS, secondDS).as[SimpleInterval]
     }
     dsList.map(_.as[SimpleInterval]).reduceLeft(rangeJoinReduce)
+  }
+
+  def writeGeneSummary(geneList: Iterable[GeneCoverage]): Unit = {
+    val calcGeneCovRatio = (gene: GeneCoverage)=> 1.0 * gene.lowCoverageLength / gene.geneLength
+    val writer = new PrintWriter(outputDirectory.resolve("gene_summary.txt").toFile)
+    try {
+      writer.println("chromosome,strand,gene,coverage")
+
+      geneList.foreach(gene => {
+        val line = "%s,%s,%s,%.2f".format(gene.chromosome, gene.strand, gene.geneId, calcGeneCovRatio(gene))
+        writer.println(line)
+      })
+    } finally {
+      writer.close()
+    }
   }
 }
