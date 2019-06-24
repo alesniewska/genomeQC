@@ -1,7 +1,7 @@
 import java.nio.file.Path
 
 import gnu.trove.list.array.{TFloatArrayList, TIntArrayList}
-import model.ContigInterval
+import model.{ContigInterval, SimpleInterval}
 import org.jetbrains.bio.CompressionType
 import org.jetbrains.bio.big.{BedGraphSection, BigWigFile}
 
@@ -24,7 +24,8 @@ class BigWigWriter(chromosomeLengthPath: Path) {
   }
 
   def writeToBigWig(coverageByChromosome: Iterable[(String, Iterable[_ <: ContigInterval])], outputPath: Path): Unit = {
-    val sectionList = coverageByChromosome.map({ chrIntervals =>
+    val mergedCoverageIntervalsByChr = coverageByChromosome.map(p => p._1 -> mergeIntervals(p._2))
+    val sectionList = mergedCoverageIntervalsByChr.map({ chrIntervals =>
       val chromosomeName = chrIntervals._1
       val intervals = chrIntervals._2
       val startList = intervals.map(_.start).toArray
@@ -32,8 +33,19 @@ class BigWigWriter(chromosomeLengthPath: Path) {
       val coverageList = intervals.map(_ => 1f).toArray
       new BedGraphSection(chromosomeName, TIntArrayList.wrap(startList), TIntArrayList.wrap(endList), TFloatArrayList.wrap(coverageList))
     }).toList.asJava
-    val chromosomeLengthArray = chromosomeLengthMap.toList.map(p => new kotlin.Pair[String, Integer](p._1, p._2)).asJava
-    BigWigFile.write(sectionList, chromosomeLengthArray, outputPath, 8, CompressionType.DEFLATE)
+    val chromosomeLengthArray = chromosomeLengthMap.toSeq.map(p => new kotlin.Pair[String, Integer](p._1, p._2)).asJava
+    BigWigFile.write(sectionList, chromosomeLengthArray, outputPath, 1, CompressionType.DEFLATE)
+  }
+
+  def mergeIntervals(intervals: Iterable[_ <: ContigInterval]): Iterable[_ <: ContigInterval] = {
+    intervals.foldLeft(List[ContigInterval]())((acc, interval) => {
+      val previousInterval = acc.headOption
+      if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
+        SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
+      } else {
+        interval :: acc
+      }
+    }).reverse
   }
 
   def readChromosomeLengths(chrFilePath: Path): Map[String, Int] = {
