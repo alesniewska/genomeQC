@@ -12,9 +12,9 @@ resolvers += "biodatageeks-snapshots" at "https://zsibio.ii.pw.edu.pl/nexus/repo
 
 
 val bigWigLibrary = "org.jetbrains.bio" % "big" % "0.8.4"
-val sparkVersion = "2.2.2"
+val sparkVersion = "2.4.2"
 
-libraryDependencies += "org.biodatageeks" % "bdg-sequila_2.11" % "0.5.2" exclude("org.apache.spark",
+libraryDependencies += "org.biodatageeks" % "bdg-sequila_2.11" % "0.5.5-spark-2.4.2" exclude("org.apache.spark",
   "spark-core_2.11") exclude("org.apache.spark", "spark-sql_2.11")
 
 libraryDependencies += bigWigLibrary
