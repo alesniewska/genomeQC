@@ -76,7 +76,8 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     val sampleIdList = sequila.table(bamTableName).select("sampleId").distinct().as[String].collect()
     sampleIdList.map(sampleName =>
       (sequila.sql(s"select * from bdg_coverage('$bamTableName','$sampleName', 'blocks')").
-        filter($"coverage" < coverageThreshold).drop("coverage").as[SimpleInterval], sampleName)
+        filter($"coverage" < coverageThreshold).drop("coverage").
+        select(withChrPrefix($"contigName").as("contigName"), $"start", $"end").as[SimpleInterval], sampleName)
     ).toList
   }
 
@@ -125,9 +126,16 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
 
   def loadMappabilityTrack(mappabilityPath: Path, mappabilityThreshold: Double): Dataset[SimpleInterval] = {
     def mappabilityIntervals = loadBigWig(mappabilityPath)
+
     def selectedIntervals = mappabilityIntervals.filter(_.annotation >= mappabilityThreshold)
       .map(interval => SimpleInterval(interval.contigName, interval.start, interval.end)).toSeq
-    sequila.sparkContext.parallelize(selectedIntervals).toDS
+
+    def mergedIntervals = bigWigWriter.mergeIntervals(selectedIntervals).map {
+      case interval: SimpleInterval => interval
+      case interval: ContigInterval => SimpleInterval(interval.contigName, interval.start, interval.end)
+    }.toSeq
+
+    sequila.sparkContext.parallelize(mergedIntervals).toDS
   }
 
   def loadBigWig(bigWigPath: Path): Iterable[AnnotatedInterval] = {

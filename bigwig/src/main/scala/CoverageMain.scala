@@ -11,15 +11,12 @@ object CoverageMain {
     val outputDirectory = Paths.get(args(4))
     val chromosomeLengthPath = Paths.get(args(5))
     val mappabilityPath = Paths.get(args(6))
-    val mappabilityThreshold = 1.0
+    val mappabilityThreshold = args(7).toDouble
 
     val processor = new IntervalProcessor(chromosomeLengthPath, outputDirectory)
-
+    outputDirectory.toFile.mkdirs()
     import processor.sequila.implicits._
 
-    processor.loadBigWig(mappabilityPath)
-
-    outputDirectory.toFile.mkdirs()
     val sampleDSList = processor.prepareLowCoverageSamples(bamLocation, coverageThreshold)
       .map(p => (p._1.cache.as[SimpleInterval], p._2))
     sampleDSList.foreach(p => processor.writeLowCoveredRegions(p._1, p._2))
