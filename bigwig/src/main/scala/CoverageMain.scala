@@ -1,6 +1,7 @@
 import java.nio.file.Paths
 
 import model._
+import org.apache.spark.sql.Column
 
 object CoverageMain {
   def main(args: Array[String]): Unit = {
@@ -17,15 +18,11 @@ object CoverageMain {
     outputDirectory.toFile.mkdirs()
     import processor.sequila.implicits._
 
-    val sampleDSList = processor.prepareLowCoverageSamples(bamLocation, coverageThreshold)
-      .map(p => (p._1.cache.as[SimpleInterval], p._2))
-    sampleDSList.foreach(p => processor.writeLowCoveredRegions(p._1, p._2))
-    val lowCoverageDS = processor.simpleRangeJoinList(sampleDSList.map(_._1)).cache
-    processor.writeLowCoveredRegions(lowCoverageDS, "intersection")
-    sampleDSList.foreach(_._1.unpersist)
+    val coverageFilter = (coverageColumn: Column) => coverageColumn < coverageThreshold
+    val lowCoverageDS = processor.writeRegionsAndIntersection(bamLocation, coverageFilter)
     val mappabilityDS = processor.loadMappabilityTrack(mappabilityPath, mappabilityThreshold)
     val regionsWithMappabilityDS = processor.rangeJoin(lowCoverageDS, mappabilityDS).as[SimpleInterval]
-    processor.writeLowCoveredRegions(regionsWithMappabilityDS, "intersection_mappability")
+    processor.writeCoverageRegions(regionsWithMappabilityDS, "intersection_mappability")
     val geneDS = processor.prepareGeneDS(gtfLocation)
     val lowCoveredGeneDS = processor.filterGenesWithLowCoverage(lowCoverageDS, geneDS, lowCoverageRatioThreshold)
     val lowCoveredGenesByStrandChromosome = lowCoveredGeneDS.rdd.groupBy(row => (row.strand, row.chromosome)).collect

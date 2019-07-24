@@ -38,15 +38,28 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     ss
   }
 
-
-  def collectByChromosome(coverageDS: Dataset[SimpleInterval]): Array[(String, Iterable[SimpleInterval])] = {
-    coverageDS.rdd.groupBy(_.contigName).collect
+  /**
+    * @param coverageFilter Function filtering interval based on coverage.
+    */
+  def writeRegionsAndIntersection(bamLocation: String, coverageFilter: Column => Column): Dataset[SimpleInterval] = {
+    val sampleDSList = prepareCoverageSamples(bamLocation)
+      .map(p => (p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval], p._2))
+    sampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
+    val lowCoverageDS = simpleRangeJoinList(sampleDSList.map(_._1)).cache()
+    writeCoverageRegions(lowCoverageDS, "intersection")
+    sampleDSList.foreach(_._1.unpersist)
+    lowCoverageDS
   }
 
-  def writeLowCoveredRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
-    val coverageByChromosome = collectByChromosome(coverageDS)
-    val outputPath = outputDirectory.resolve(s"low_coverage_regions_$sampleName.bw")
+  def writeCoverageRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
+    val coverageByChromosome = coverageDS.rdd.groupBy(_.contigName).collect
+    val outputPath = outputDirectory.resolve(s"coverage_regions_$sampleName.bw")
     bigWigWriter.writeToBigWig(coverageByChromosome, outputPath)
+  }
+
+  def writeCoverageStrandedRegions(coverageDS: Dataset[StrandedInterval], outputPathBuilder: String => Path): Unit = {
+    val regionsByStrandedContig = coverageDS.rdd.groupBy(row => (row.strand, row.contigName)).collect
+    bigWigWriter.writeTwoBigWigFiles(regionsByStrandedContig, outputPathBuilder)
   }
 
   def writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])]): Unit = {
@@ -68,7 +81,13 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     ).seq
   }
 
-  def prepareLowCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(Dataset[SimpleInterval], String)] = {
+  def prepareHighCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(Dataset[SimpleInterval], String)] = {
+    prepareCoverageSamples(bamLocation).map( p =>
+      p._1.filter($"coverage" > coverageThreshold).drop("coverage").as[SimpleInterval] -> p._2
+    )
+  }
+
+  def prepareCoverageSamples(bamLocation: String): List[(Dataset[SimpleInterval], String)] = {
     sequila.sql(s"create database if not exists $dbName")
     sequila.sql(s"use $dbName")
     sequila.sql(s"drop table if exists $bamTableName")
@@ -76,7 +95,6 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     val sampleIdList = sequila.table(bamTableName).select("sampleId").distinct().as[String].collect()
     sampleIdList.map(sampleName =>
       (sequila.sql(s"select * from bdg_coverage('$bamTableName','$sampleName', 'blocks')").
-        filter($"coverage" < coverageThreshold).drop("coverage").
         select(withChrPrefix($"contigName").as("contigName"), $"start", $"end").as[SimpleInterval], sampleName)
     ).toList
   }
@@ -96,6 +114,25 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
       .select(withChrPrefix($"seqname").as("contigName"), $"start", $"end", $"strand", geneIdExpression)
       .as[Gene]
     geneDS
+  }
+
+  def prepareExonDS(gtfLocation: String): DataFrame = {
+    // TODO: DRY
+    val gtfSchema = StructType(Array(
+      StructField("seqname", StringType, nullable = false), StructField("source", StringType, nullable = false),
+      StructField("feature", StringType, nullable = false), StructField("start", IntegerType, nullable = false),
+      StructField("end", IntegerType, nullable = false), StructField("score", StringType, nullable = false),
+      StructField("strand", StringType, nullable = false), StructField("frame", StringType, nullable = false),
+      StructField("attributes", StringType, nullable = false)
+    ))
+    val geneIdExpression = regexp_extract($"attributes", """.*gene_id\s"([^"]+)";""", 1).as("geneId")
+    val exonIdExpression = regexp_extract($"attributes",  """.*exon_id\s"([^"]+)";""", 1).as("exonId")
+    val exonDS = sequila.read.option("sep", "\t").option("comment", "#").schema(gtfSchema).csv(gtfLocation).
+      select("seqname", "feature", "start", "end", "strand", "attributes").
+      filter($"feature" === "exon").
+      select(withChrPrefix($"seqname").as("contigName"), $"start", $"end", $"strand",
+        geneIdExpression, exonIdExpression)
+    exonDS
   }
 
   def withChrPrefix(contigName: Column): Column = {
@@ -124,11 +161,20 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     lowGeneCoverageDS
   }
 
+  def filterEntirelyCoveredIntervals(coverageIntervalsDS: Dataset[_ <: ContigInterval],
+                                     intervalComplexId: String*): DataFrame = {
+    val aggKeyColumns = intervalComplexId.map(col)
+
+    coverageIntervalsDS.groupBy(aggKeyColumns: _*).agg(
+      first($"start").as("start"), first($"end").as("end"), first($"intervalLength").as("intervalLength"),
+      sum($"end" - $"start").cast(IntegerType).as("coverageLength")).
+      filter($"intervalLength" === $"coverageLength")
+  }
+
   def loadMappabilityTrack(mappabilityPath: Path, mappabilityThreshold: Double): Dataset[SimpleInterval] = {
     def mappabilityIntervals = loadBigWig(mappabilityPath)
 
-    def selectedIntervals = mappabilityIntervals.filter(_.annotation >= mappabilityThreshold)
-      .map(interval => SimpleInterval(interval.contigName, interval.start, interval.end)).toSeq
+    def selectedIntervals = bigWigWriter.mergeIntervals(mappabilityIntervals.filter(_.score >= mappabilityThreshold))
 
     def mergedIntervals = bigWigWriter.mergeIntervals(selectedIntervals).map {
       case interval: SimpleInterval => interval
@@ -138,16 +184,23 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
     sequila.sparkContext.parallelize(mergedIntervals).toDS
   }
 
-  def loadBigWig(bigWigPath: Path): Iterable[AnnotatedInterval] = {
+  def loadBigWig(bigWigPath: Path): Iterable[ScoredInterval] = {
     val bigWigFile = BigWigFile.read(bigWigPath, null)
     val sections = bigWigFile.getChromosomes.values.par.flatMap(chr => bigWigFile.query(chr.toString).asScala.flatMap(section =>
       section.query.iterator().asScala.map(iv => {
-        AnnotatedInterval(withChrPrefix(section.getChrom), iv.getStart, iv.getEnd, iv.getScore)
+        ScoredInterval(withChrPrefix(section.getChrom), iv.getStart, iv.getEnd, iv.getScore)
       })
     )).seq
     sections
   }
 
+  def loadBed(bedLocation: String): Dataset[SimpleInterval] = {
+    val bedSchema = StructType(Array(
+      StructField("contigName", StringType, nullable = false), StructField("start", IntegerType, nullable = false),
+      StructField("end", IntegerType, nullable = false)))
+
+    sequila.read.option("sep", "\t").schema(bedSchema).csv(bedLocation).as[SimpleInterval]
+  }
 
   def rangeJoin(firstDS: Dataset[_ <: ContigInterval], secondDS: Dataset[_ <: ContigInterval]): DataFrame = {
     val firstStart = firstDS.col("start")
@@ -180,6 +233,21 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
 
       geneList.foreach(gene => {
         val line = "%s,%s,%s,%.2f".format(gene.chromosome, gene.strand, gene.geneId, calcGeneCovRatio(gene))
+        writer.println(line)
+      })
+    } finally {
+      writer.close()
+    }
+  }
+
+  def writeGeneExonSummary(geneList: Iterable[(String, String, String, Double)]): Unit = {
+    // TODO: DRY
+    val writer = new PrintWriter(outputDirectory.resolve("exon_gene_summary.txt").toFile)
+    try {
+      writer.println("chromosome,strand,gene,exon_coverage")
+
+      geneList.foreach(gene => {
+        val line = "%s,%s,%s,%.2f".format(gene._1, gene._2, gene._3, gene._4)
         writer.println(line)
       })
     } finally {
