@@ -3,6 +3,7 @@
 For compilation sbt is needed (tested on version 1.1.2)
 
 ```bash
+cd bigwig
 sbt clean assembly
 ```
 ## Running
