@@ -1,4 +1,3 @@
-import java.io.PrintWriter
 import java.nio.file.Path
 
 import model._
@@ -10,14 +9,14 @@ import org.jetbrains.bio.big._
 
 import scala.collection.JavaConverters._
 
-class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
+class IntervalProcessor(outputDirectory: Path) {
 
   val CHR_PREFIX = "chr"
 
   val dbName = "bdgeek"
   val bamTableName = "reads"
   val sequila: SequilaSession = configureSequilaSession
-  val bigWigWriter = new BigWigWriter(chromosomeLengthPath)
+  val resultWriter = new ResultWriter()
 
   import sequila.implicits._
 
@@ -53,26 +52,26 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
 
   def writeCoverageRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
     val coverageByChromosome = coverageDS.rdd.groupBy(_.contigName).collect
-    val outputPath = outputDirectory.resolve(s"coverage_regions_$sampleName.bw")
-    bigWigWriter.writeToBigWig(coverageByChromosome, outputPath)
+    val outputPath = outputDirectory.resolve(s"coverage_regions_$sampleName.bed")
+    resultWriter.writeResultToBedFile(coverageByChromosome, outputPath)
   }
 
   def writeCoverageStrandedRegions(coverageDS: Dataset[StrandedInterval], outputPathBuilder: String => Path): Unit = {
     val regionsByStrandedContig = coverageDS.rdd.groupBy(row => (row.strand, row.contigName)).collect
-    bigWigWriter.writeTwoBigWigFiles(regionsByStrandedContig, outputPathBuilder)
+    resultWriter.writePairOfResults(regionsByStrandedContig, outputPathBuilder)
   }
 
   def writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])]): Unit = {
     val coverageByStrandChromosome = toCoverageByChromosome(lowCoveredGenesByStrandChromosome)
-    val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_genes_$strand.bw")
-    bigWigWriter.writeTwoBigWigFiles(coverageByStrandChromosome, outputPathBuilder)
+    val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_genes_$strand.bed")
+    resultWriter.writePairOfResults(coverageByStrandChromosome, outputPathBuilder)
   }
 
   def writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome: Iterable[((String, String), Iterable[GeneCoverage])]): Unit = {
     val entirelyLowCoveredGenesByChromosome = lowCoveredGenesByStrandChromosome.map(p => (p._1, p._2.filter(cov => cov.lowCoverageLength == cov.geneLength)))
     val coverageByChromosome = toCoverageByChromosome(entirelyLowCoveredGenesByChromosome)
-    val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_whole_genes_$strand.bw")
-    bigWigWriter.writeTwoBigWigFiles(coverageByChromosome, outputPathBuilder)
+    val outputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_whole_genes_$strand.bed")
+    resultWriter.writePairOfResults(coverageByChromosome, outputPathBuilder)
   }
 
   private def toCoverageByChromosome(lowCoveredGeneByChromosome: Iterable[((String, String), Iterable[GeneCoverage])]) = {
@@ -174,9 +173,9 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
   def loadMappabilityTrack(mappabilityPath: Path, mappabilityThreshold: Double): Dataset[SimpleInterval] = {
     def mappabilityIntervals = loadBigWig(mappabilityPath)
 
-    def selectedIntervals = bigWigWriter.mergeIntervals(mappabilityIntervals.filter(_.score >= mappabilityThreshold))
+    def selectedIntervals = resultWriter.mergeIntervals(mappabilityIntervals.filter(_.score >= mappabilityThreshold))
 
-    def mergedIntervals = bigWigWriter.mergeIntervals(selectedIntervals).map {
+    def mergedIntervals = resultWriter.mergeIntervals(selectedIntervals).map {
       case interval: SimpleInterval => interval
       case interval: ContigInterval => SimpleInterval(interval.contigName, interval.start, interval.end)
     }.toSeq
@@ -223,35 +222,5 @@ class IntervalProcessor(chromosomeLengthPath: Path, outputDirectory: Path) {
       rangeJoin(firstDS, secondDS).as[SimpleInterval]
     }
     dsList.map(_.as[SimpleInterval]).reduceLeft(rangeJoinReduce)
-  }
-
-  def writeGeneSummary(geneList: Iterable[GeneCoverage]): Unit = {
-    val calcGeneCovRatio = (gene: GeneCoverage)=> 1.0 * gene.lowCoverageLength / gene.geneLength
-    val writer = new PrintWriter(outputDirectory.resolve("gene_summary.txt").toFile)
-    try {
-      writer.println("chromosome,strand,gene,coverage")
-
-      geneList.foreach(gene => {
-        val line = "%s,%s,%s,%.2f".format(gene.chromosome, gene.strand, gene.geneId, calcGeneCovRatio(gene))
-        writer.println(line)
-      })
-    } finally {
-      writer.close()
-    }
-  }
-
-  def writeGeneExonSummary(geneList: Iterable[(String, String, String, Double)]): Unit = {
-    // TODO: DRY
-    val writer = new PrintWriter(outputDirectory.resolve("exon_gene_summary.txt").toFile)
-    try {
-      writer.println("chromosome,strand,gene,exon_coverage")
-
-      geneList.foreach(gene => {
-        val line = "%s,%s,%s,%.2f".format(gene._1, gene._2, gene._3, gene._4)
-        writer.println(line)
-      })
-    } finally {
-      writer.close()
-    }
   }
 }

@@ -10,11 +10,10 @@ object CoverageMain {
     val coverageThreshold = args(2).toInt
     val lowCoverageRatioThreshold = args(3).toDouble
     val outputDirectory = Paths.get(args(4))
-    val chromosomeLengthPath = Paths.get(args(5))
-    val mappabilityPath = Paths.get(args(6))
-    val mappabilityThreshold = args(7).toDouble
+    val mappabilityPath = Paths.get(args(5))
+    val mappabilityThreshold = args(6).toDouble
 
-    val processor = new IntervalProcessor(chromosomeLengthPath, outputDirectory)
+    val processor = new IntervalProcessor(outputDirectory)
     outputDirectory.toFile.mkdirs()
     import processor.sequila.implicits._
 
@@ -26,7 +25,7 @@ object CoverageMain {
     val geneDS = processor.prepareGeneDS(gtfLocation)
     val lowCoveredGeneDS = processor.filterGenesWithLowCoverage(lowCoverageDS, geneDS, lowCoverageRatioThreshold)
     val lowCoveredGenesByStrandChromosome = lowCoveredGeneDS.rdd.groupBy(row => (row.strand, row.chromosome)).collect
-    processor.writeGeneSummary(lowCoveredGenesByStrandChromosome.flatMap(_._2))
+    processor.resultWriter.writeGeneSummary(lowCoveredGenesByStrandChromosome.flatMap(_._2), outputDirectory.resolve("gene_summary.txt"))
     processor.writePartiallyLowCoveredGenes(lowCoveredGenesByStrandChromosome)
     processor.writeEntirelyLowCoveredGenes(lowCoveredGenesByStrandChromosome)
   }
