@@ -41,8 +41,8 @@ class IntervalProcessor(outputDirectory: Path) {
     * @param coverageFilter Function filtering interval based on coverage.
     */
   def writeRegionsAndIntersection(bamLocation: String, coverageFilter: Column => Column): Dataset[SimpleInterval] = {
-    val sampleDSList = prepareCoverageSamples(bamLocation)
-      .map(p => (p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval], p._2))
+    val sampleDSList = prepareCoverageSamples(bamLocation).
+      map(p => (p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval], p._2))
     sampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
     val lowCoverageDS = simpleRangeJoinList(sampleDSList.map(_._1)).cache()
     writeCoverageRegions(lowCoverageDS, "intersection")

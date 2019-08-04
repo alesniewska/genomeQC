@@ -35,7 +35,7 @@ object ExomeVariantMain {
     processor.writeCoverageStrandedRegions(geneCoverageIntersectionDS,
       (strand: String) => outputDirectory.resolve(s"genes_${strand}_high_coverage.bed"))
     val entirelyHighCoveredGenes = processor.filterEntirelyCoveredIntervals(geneCoverageIntersectionDS,
-      "strand", "contigName").as[StrandedInterval]
+      "geneId", "contigName", "strand").as[StrandedInterval]
     processor.writeCoverageStrandedRegions(entirelyHighCoveredGenes,
       (strand: String) => outputDirectory.resolve(s"entirely_covered_genes_$strand.bed"))
     geneCoverageIntersectionDS.unpersist()
@@ -46,14 +46,13 @@ object ExomeVariantMain {
     processor.writeCoverageStrandedRegions(exonCoverageIntersectionDS,
       (strand: String) => outputDirectory.resolve(s"exons_${strand}_high_coverage.bed"))
     val entirelyHighCoveredExons = processor.filterEntirelyCoveredIntervals(exonCoverageIntersectionDS,
-      "strand", "contigName").as[StrandedInterval]
+      "exonId", "contigName", "strand").as[StrandedInterval]
     processor.writeCoverageStrandedRegions(entirelyHighCoveredExons,
       (strand: String) => outputDirectory.resolve(s"entirely_covered_exons_$strand.bed"))
 
     val geneLengthDF = exonDS.groupBy($"geneId").agg(sum($"end" - $"start").as("exonLengthSum")).cache
 
-    val exonCoverageRatios = exonCoverageIntersectionDS.groupBy($"geneId").
-      agg(first($"strand").as("strand"), first($"contigName").as("contigName"),
+    val exonCoverageRatios = exonCoverageIntersectionDS.groupBy("geneId", "contigName", "strand").agg(
         sum($"end" - $"start").as("exonCoverageLength")).join(geneLengthDF, "geneId").
       select($"contigName", $"strand", $"geneId", ($"exonCoverageLength" / $"exonLengthSum").as("exonCoverageRatio")).
         as[(String, String, String, Double)].collect
