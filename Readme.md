@@ -1,3 +1,4 @@
+
 ## Compilation
 
 For compilation sbt is needed (tested on version 1.1.2)
@@ -6,7 +7,7 @@ For compilation sbt is needed (tested on version 1.1.2)
 cd bigwig
 sbt clean assembly
 ```
-#### Computing low covered genes
+# Computing low covered genes
 
 ## Running
 
@@ -37,15 +38,15 @@ Intersection of low coverered regions from all inputs is then joined with region
 
 ## Sample data
 1. BAM files
-https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/10XGenomics/NA24385_phased_possorted_bam.bam
-https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG003_NA24149_father/10XGenomics/NA24149_phased_possorted_bam.bam
-https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG004_NA24143_mother/10XGenomics/NA24143_phased_possorted_bam.bam
+[https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/10XGenomics/NA24385_phased_possorted_bam.bam](https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG002_NA24385_son/10XGenomics/NA24385_phased_possorted_bam.bam)
+[https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG003_NA24149_father/10XGenomics/NA24149_phased_possorted_bam.bam](https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG003_NA24149_father/10XGenomics/NA24149_phased_possorted_bam.bam)
+[https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG004_NA24143_mother/10XGenomics/NA24143_phased_possorted_bam.bam](https://ftp-trace.ncbi.nlm.nih.gov/giab/ftp/data/AshkenazimTrio/HG004_NA24143_mother/10XGenomics/NA24143_phased_possorted_bam.bam)
 2. GTF file
 ftp://ftp.ensembl.org/pub/grch37/current/gtf/homo_sapiens/Homo_sapiens.GRCh37.87.chr.gtf.gz
 3. Mappability regions file
 http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeCrgMapabilityAlign100mer.bigWig
 
-#### Exome variant
+# Exome variant
 
 ## Running
 
