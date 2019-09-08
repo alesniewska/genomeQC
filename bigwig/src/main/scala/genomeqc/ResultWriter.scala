@@ -1,6 +1,8 @@
+package genomeqc
+
 import java.nio.file.Path
 
-import model.{ContigInterval, SimpleInterval, StrandedInterval}
+import genomeqc.model.{ContigInterval, SimpleInterval, StrandedInterval}
 import org.apache.spark.sql.{DataFrame, Dataset, SequilaSession}
 
 class ResultWriter(sequila: SequilaSession) {

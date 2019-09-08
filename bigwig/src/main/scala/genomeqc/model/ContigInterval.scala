@@ -1,4 +1,4 @@
-package model
+package genomeqc.model
 
 abstract class ContigInterval {
   def contigName: String

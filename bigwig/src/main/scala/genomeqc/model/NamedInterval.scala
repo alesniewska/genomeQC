@@ -1,4 +1,4 @@
-package model
+package genomeqc.model
 
 case class NamedInterval(contigName: String, start: Int, end: Int, name: String) extends ContigInterval {
 }

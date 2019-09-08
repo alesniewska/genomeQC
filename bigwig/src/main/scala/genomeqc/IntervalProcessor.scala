@@ -1,6 +1,8 @@
+package genomeqc
+
 import java.nio.file.Path
 
-import model._
+import genomeqc.model._
 import org.apache.log4j.{Level, LogManager}
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
@@ -44,6 +46,8 @@ class IntervalProcessor(outputDirectory: Path) {
     val sampleDSList = prepareCoverageSamples(bamLocation).
       map(p => p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval] -> p._2)
     sampleDSList.foreach(p => logDiagnosticInfo(p._1, p._2))
+    val mergeIntervalsBC = sequila.sparkContext.broadcast(resultWriter.mergeIntervals)
+    val sampleDSList.map(p => p._1.mapPartitions(part => mergeIntervalsBC.value(part)) -> p._2)
     sampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
     if (sampleDSList.size > 1) {
       logger.debug("Computing intersection of low coverage interval across samples")

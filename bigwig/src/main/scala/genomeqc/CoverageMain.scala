@@ -1,6 +1,8 @@
+package genomeqc
+
 import java.nio.file.Paths
 
-import model.SimpleInterval
+import genomeqc.model.SimpleInterval
 import org.apache.log4j.{LogManager, PropertyConfigurator}
 import org.apache.spark.sql.Column
 
