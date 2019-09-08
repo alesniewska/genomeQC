@@ -28,6 +28,7 @@ assemblyShadeRules in assembly := Seq(
 )
 
 assemblyMergeStrategy in assembly := {
+  case PathList("META-INF", "services", _*) => MergeStrategy.first
   case PathList("META-INF", _*) => MergeStrategy.discard
   case referenceOverrides if referenceOverrides.contains("reference-overrides.conf") => MergeStrategy.concat
   case PathList("reference-overrides.conf") => MergeStrategy.concat
