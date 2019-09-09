@@ -21,7 +21,7 @@ class IntervalProcessor(outputDirectory: Path) {
   val BAM_TABLE_NAME = "reads"
 
   val sequila: SequilaSession = configureSequilaSession
-  val resultWriter = new ResultWriter(sequila)
+  val resultWriter = new ResultWriter(this)
 
   import sequila.implicits._
 
@@ -30,8 +30,8 @@ class IntervalProcessor(outputDirectory: Path) {
     val spark = SparkSession.builder()
       .getOrCreate()
     val ss = SequilaSession(spark)
-    ss.sqlContext.setConf("spark.biodatageeks.bam.predicatePushdown","true")
     ss.sqlContext.setConf("spark.sql.broadcastTimeout", "36000")
+    ss.sqlContext.setConf("spark.file.transferTo", "false")
     SequilaRegister.register(ss)
     UDFRegister.register(ss)
     logger.debug("Finished initializing Sequila")
@@ -45,20 +45,20 @@ class IntervalProcessor(outputDirectory: Path) {
     logger.debug("Loading BAM files")
     val sampleDSList = prepareCoverageSamples(bamLocation).
       map(p => p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval] -> p._2)
-    sampleDSList.foreach(p => logDiagnosticInfo(p._1, p._2))
-    val mergeIntervalsBC = sequila.sparkContext.broadcast(resultWriter.mergeIntervals)
-    val sampleDSList.map(p => p._1.mapPartitions(part => mergeIntervalsBC.value(part)) -> p._2)
-    sampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
-    if (sampleDSList.size > 1) {
+    logger.debug("Merging coverage intervals")
+    val mergedSampleDSList = sampleDSList.map(p => mergeIntervalsOnPartition(p._1) -> p._2)
+    mergedSampleDSList.foreach(p => logDiagnosticInfo(p._1, p._2))
+    mergedSampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
+    if (mergedSampleDSList.size > 1) {
       logger.debug("Computing intersection of low coverage interval across samples")
-      val lowCoverageDS = simpleRangeJoinList(sampleDSList.map(_._1)).cache()
+      val lowCoverageDS = simpleRangeJoinList(mergedSampleDSList.map(_._1)).cache()
       logDiagnosticInfo(lowCoverageDS, "bam_intersection")
       writeCoverageRegions(lowCoverageDS, "intersection")
-      sampleDSList.foreach(_._1.unpersist)
+      mergedSampleDSList.foreach(_._1.unpersist)
       lowCoverageDS
     } else {
       logger.debug("Only one bam file provided - skipping computing intersection")
-      sampleDSList.head._1
+      mergedSampleDSList.head._1
     }
   }
 
@@ -71,6 +71,39 @@ class IntervalProcessor(outputDirectory: Path) {
       val partitionSizesStr = partitionSizes.mkString(", ")
       logger.log(Level.INFO, s"$dsName, partition row distribution: [$partitionSizesStr] (total $totalSize)")
     }
+  }
+
+  def mergeIntervals(intervals: Iterator[_ <: ContigInterval]): Iterator[SimpleInterval] = {
+    intervals.foldLeft(List[SimpleInterval]())((acc, interval) => {
+      val previousInterval = acc.headOption
+      if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
+        SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
+      } else {
+        val simpleInterval = interval match {
+          case SimpleInterval(_, _, _) => interval.asInstanceOf[SimpleInterval]
+          case other => SimpleInterval(other.contigName, other.start, other.end)
+        }
+        simpleInterval :: acc
+      }
+    }).reverseIterator
+  }
+
+  def mergeIntervalsOnPartition(intervalDS: Dataset[SimpleInterval]): Dataset[SimpleInterval] = {
+    // TODO: DRY
+    intervalDS.mapPartitions(part => {
+      part.foldLeft(List[SimpleInterval]())((acc, interval) => {
+        val previousInterval = acc.headOption
+        if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
+          SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
+        } else {
+          val simpleInterval = interval match {
+            case SimpleInterval(_, _, _) => interval.asInstanceOf[SimpleInterval]
+            case other => SimpleInterval(other.contigName, other.start, other.end)
+          }
+          simpleInterval :: acc
+        }
+      }).reverseIterator
+    })
   }
 
   def writeCoverageRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
@@ -212,7 +245,7 @@ class IntervalProcessor(outputDirectory: Path) {
     logger.debug("Finished filtering mappability")
 
     logger.debug("Merging mappability intervals")
-    def mergedIntervals = resultWriter.mergeIntervals(selectedIntervals.iterator).map {
+    def mergedIntervals = mergeIntervals(selectedIntervals.iterator).map {
       case interval: SimpleInterval => interval
       case interval: ContigInterval => SimpleInterval(interval.contigName, interval.start, interval.end)
     }.toSeq

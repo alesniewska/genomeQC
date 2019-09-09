@@ -5,25 +5,9 @@ import java.nio.file.Path
 import genomeqc.model.{ContigInterval, SimpleInterval, StrandedInterval}
 import org.apache.spark.sql.{DataFrame, Dataset, SequilaSession}
 
-class ResultWriter(sequila: SequilaSession) {
+class ResultWriter(processor: IntervalProcessor) {
 
-  import sequila.implicits._
-
-  val mergeIntervals: Iterator[_ <: ContigInterval] => Iterator[SimpleInterval] = (intervals: Iterator[_ <: ContigInterval]) => {
-    intervals.foldLeft(List[SimpleInterval]())((acc, interval) => {
-      val previousInterval = acc.headOption
-      if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
-        SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
-      } else {
-        val simpleInterval = interval match {
-          case SimpleInterval(_, _, _) => interval.asInstanceOf[SimpleInterval]
-          case other => SimpleInterval(other.contigName, other.start, other.end)
-        }
-        simpleInterval :: acc
-      }
-    }).reverseIterator
-  }
-
+  import processor.sequila.implicits._
 
   /**
     *
@@ -39,10 +23,8 @@ class ResultWriter(sequila: SequilaSession) {
   }
 
   def writeResultToBedFile(coverageDS: Dataset[SimpleInterval], outputPath: Path): Unit = {
-    val mergeIntervalsBC = sequila.sparkContext.broadcast(mergeIntervals)
-    coverageDS.orderBy("contigName", "start").coalesce(1).
-      mapPartitions(it => mergeIntervalsBC.value(it)).
-      write.option("sep", "\t").csv(outputPath.toString)
+    val coverageOnSinglePartition = coverageDS.orderBy("contigName", "start").coalesce(1)
+    processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t").csv(outputPath.toString)
   }
 
   def writeGeneSummary(geneList: DataFrame, outputPath: Path): Unit = {
