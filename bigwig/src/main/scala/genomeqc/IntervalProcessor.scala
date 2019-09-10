@@ -30,7 +30,7 @@ class IntervalProcessor(outputDirectory: Path) {
     val spark = SparkSession.builder()
       .getOrCreate()
     val ss = SequilaSession(spark)
-    ss.sqlContext.setConf("spark.sql.broadcastTimeout", "36000")
+    ss.sqlContext.setConf("spark.sql.broadcastTimeout", "3600")
     ss.sqlContext.setConf("spark.file.transferTo", "false")
     SequilaRegister.register(ss)
     UDFRegister.register(ss)
@@ -118,8 +118,9 @@ class IntervalProcessor(outputDirectory: Path) {
   }
 
   def writeLowCoveredGenes(lowCoveredGeneDS: Dataset[GeneCoverage]): Unit = {
+    lowCoveredGeneDS.cache()
     val geneIntervalDF = lowCoveredGeneDS.flatMap(gene => gene.coverageList.map(i =>
-      GeneInterval(i.contigName, i.start, i.end, gene.strand, gene.geneId, gene.lowCoverageLength, gene.geneLength))).cache()
+      GeneInterval(i.contigName, i.start, i.end, gene.strand, gene.geneId, gene.lowCoverageLength, gene.geneLength)))
     logDiagnosticInfo(geneIntervalDF, "gene_coverage")
     val entirelyLowCoveredGeneDS = geneIntervalDF.filter($"lowCoverageLength" === $"geneLength").as[StrandedInterval]
 
@@ -132,7 +133,7 @@ class IntervalProcessor(outputDirectory: Path) {
     logger.debug("Filtering and writing entirely low covered genes")
     resultWriter.writePairOfResults(entirelyLowCoveredGeneDS, entireLowCoverageOutputPathBuilder)
     logger.debug("Writing gene summary")
-    resultWriter.writeGeneSummary(geneIntervalDF.toDF, geneSummaryPath)
+    resultWriter.writeGeneSummary(lowCoveredGeneDS.toDF, geneSummaryPath)
   }
 
   def prepareHighCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(Dataset[SimpleInterval], String)] = {
