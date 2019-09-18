@@ -2,8 +2,8 @@ package genomeqc
 
 import java.nio.file.Path
 
-import genomeqc.model.{ContigInterval, SimpleInterval, StrandedInterval}
-import org.apache.spark.sql.{DataFrame, Dataset, SequilaSession}
+import genomeqc.model.{SimpleInterval, StrandedInterval}
+import org.apache.spark.sql.{DataFrame, Dataset}
 
 class ResultWriter(processor: IntervalProcessor) {
 
@@ -23,8 +23,10 @@ class ResultWriter(processor: IntervalProcessor) {
   }
 
   def writeResultToBedFile(coverageDS: Dataset[SimpleInterval], outputPath: Path): Unit = {
+    val tempPath = outputPath.resolve("temp")
     val coverageOnSinglePartition = coverageDS.orderBy("contigName", "start").coalesce(1)
-    processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t").csv(outputPath.toString)
+    processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t").csv(tempPath.toString)
+
   }
 
   def writeGeneSummary(geneList: DataFrame, outputPath: Path): Unit = {
@@ -34,7 +36,7 @@ class ResultWriter(processor: IntervalProcessor) {
   }
 
   def writeGeneExonSummary(geneList: DataFrame, outputPath: Path): Unit = {
-    geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"),
+    geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"), $"exonId".as("exon"),
       ($"exonCoverageLength" / $"exonLengthSum").as("exon_coverage")).coalesce(1).
       write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
   }

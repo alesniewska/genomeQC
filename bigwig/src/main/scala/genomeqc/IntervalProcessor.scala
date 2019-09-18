@@ -3,7 +3,7 @@ package genomeqc
 import java.nio.file.Path
 
 import genomeqc.model._
-import org.apache.log4j.{Level, LogManager}
+import org.apache.log4j.{LogManager, PropertyConfigurator}
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
@@ -25,51 +25,53 @@ class IntervalProcessor(outputDirectory: Path) {
 
   import sequila.implicits._
 
+  outputDirectory.toFile.mkdirs()
+
   def configureSequilaSession: SequilaSession = {
+    PropertyConfigurator.configure(getClass.getClassLoader.getResource("log4j.properties"))
     logger.debug("Initializing Sequila")
     val spark = SparkSession.builder()
       .getOrCreate()
     val ss = SequilaSession(spark)
-    ss.sqlContext.setConf("spark.sql.broadcastTimeout", "3600")
-    ss.sqlContext.setConf("spark.file.transferTo", "false")
     SequilaRegister.register(ss)
     UDFRegister.register(ss)
     logger.debug("Finished initializing Sequila")
     ss
   }
 
-  /**
-    * @param coverageFilter Function filtering intervals based on value of coverage.
-    */
-  def writeRegionsAndIntersection(bamLocation: String, coverageFilter: Column => Column): Dataset[SimpleInterval] = {
+  def prepareLowCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(String, Dataset[SimpleInterval])] = {
     logger.debug("Loading BAM files")
-    val sampleDSList = prepareCoverageSamples(bamLocation).
-      map(p => p._1.filter(coverageFilter($"coverage")).cache.as[SimpleInterval] -> p._2)
-    logger.debug("Merging coverage intervals")
-    val mergedSampleDSList = sampleDSList.map(p => mergeIntervalsOnPartition(p._1) -> p._2)
-    mergedSampleDSList.foreach(p => logDiagnosticInfo(p._1, p._2))
-    mergedSampleDSList.foreach(p => writeCoverageRegions(p._1, p._2))
-    if (mergedSampleDSList.size > 1) {
-      logger.debug("Computing intersection of low coverage interval across samples")
-      val lowCoverageDS = simpleRangeJoinList(mergedSampleDSList.map(_._1)).cache()
-      logDiagnosticInfo(lowCoverageDS, "bam_intersection")
-      writeCoverageRegions(lowCoverageDS, "intersection")
-      mergedSampleDSList.foreach(_._1.unpersist)
-      lowCoverageDS
-    } else {
-      logger.debug("Only one bam file provided - skipping computing intersection")
-      mergedSampleDSList.head._1
-    }
+    prepareCoverageSamples(bamLocation).map(p =>
+      p._1 -> mergeIntervalsOnPartition(p._2.filter($"coverage" < coverageThreshold).as[SimpleInterval])
+    )
   }
 
-  private def logDiagnosticInfo(ds: Dataset[_], dsName: String): Unit = {
-    if (logger.isInfoEnabled) {
-      val partitionCount = ds.rdd.getNumPartitions
-      logger.log(Level.INFO, s"$dsName, number of partitions: $partitionCount")
-      val partitionSizes = ds.rdd.mapPartitions(part => Iterator(part.size)).collect
-      val totalSize = partitionSizes.sum
-      val partitionSizesStr = partitionSizes.mkString(", ")
-      logger.log(Level.INFO, s"$dsName, partition row distribution: [$partitionSizesStr] (total $totalSize)")
+  def prepareHighCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(String, Dataset[SimpleInterval])] = {
+    logger.debug("Loading BAM files")
+    prepareCoverageSamples(bamLocation).map(p =>
+      p._1 -> mergeIntervalsOnPartition(p._2.filter($"coverage" > coverageThreshold).as[SimpleInterval])
+    )
+  }
+
+  def prepareJoinedHighCoverageDS(bamLocation: String, coverageThreshold: Int): Dataset[SimpleInterval] = {
+    val sampleDSList = prepareHighCoverageSamples(bamLocation, coverageThreshold)
+    joinCoverageSamples(sampleDSList.map(_._2))
+  }
+
+  def prepareJoinedLowCoverageDS(bamLocation: String, coverageThreshold: Int): Dataset[SimpleInterval] = {
+    val sampleDSList = prepareLowCoverageSamples(bamLocation, coverageThreshold)
+    joinCoverageSamples(sampleDSList.map(_._2))
+  }
+
+  def joinCoverageSamples(sampleDSList: List[Dataset[SimpleInterval]]): Dataset[SimpleInterval] = {
+    val sampleCount = sampleDSList.size
+    if (sampleCount > 1) {
+      logger.info(s"Computing intersection of low coverage interval across $sampleCount samples")
+      val lowCoverageDS = simpleRangeJoinList(sampleDSList)
+      lowCoverageDS
+    } else {
+      logger.info("Only one bam file provided - skipping computing intersection")
+      sampleDSList.head
     }
   }
 
@@ -106,7 +108,7 @@ class IntervalProcessor(outputDirectory: Path) {
     })
   }
 
-  def writeCoverageRegions(coverageDS: Dataset[SimpleInterval], sampleName: String): Unit = {
+  def writeCoverageRegions(sampleName: String, coverageDS: Dataset[SimpleInterval]): Unit = {
     val outputPath = outputDirectory.resolve(s"coverage_regions_$sampleName")
     logger.debug(s"Saving $sampleName")
     resultWriter.writeResultToBedFile(coverageDS, outputPath)
@@ -118,64 +120,51 @@ class IntervalProcessor(outputDirectory: Path) {
   }
 
   def writeLowCoveredGenes(lowCoveredGeneDS: Dataset[GeneCoverage]): Unit = {
-    lowCoveredGeneDS.cache()
     val geneIntervalDF = lowCoveredGeneDS.flatMap(gene => gene.coverageList.map(i =>
       GeneInterval(i.contigName, i.start, i.end, gene.strand, gene.geneId, gene.lowCoverageLength, gene.geneLength)))
-    logDiagnosticInfo(geneIntervalDF, "gene_coverage")
-    val entirelyLowCoveredGeneDS = geneIntervalDF.filter($"lowCoverageLength" === $"geneLength").as[StrandedInterval]
 
     val lowCoverageOutputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_genes_$strand")
-    val entireLowCoverageOutputPathBuilder = (strand: String) => outputDirectory.resolve(s"low_coverage_whole_genes_$strand")
-    val geneSummaryPath = outputDirectory.resolve("gene_summary")
 
-    logger.debug("Writing low covered genes")
+    logger.debug("Writing substandard genes")
     resultWriter.writePairOfResults(geneIntervalDF.as[StrandedInterval], lowCoverageOutputPathBuilder)
-    logger.debug("Filtering and writing entirely low covered genes")
-    resultWriter.writePairOfResults(entirelyLowCoveredGeneDS, entireLowCoverageOutputPathBuilder)
+  }
+
+  def writeGeneSummary(geneCoverageDS: Dataset[GeneCoverage]): Unit = {
+    val geneSummaryPath = outputDirectory.resolve("gene_summary.csv")
     logger.debug("Writing gene summary")
-    resultWriter.writeGeneSummary(lowCoveredGeneDS.toDF, geneSummaryPath)
+    resultWriter.writeGeneSummary(geneCoverageDS.toDF, geneSummaryPath)
   }
 
-  def prepareHighCoverageSamples(bamLocation: String, coverageThreshold: Int): List[(Dataset[SimpleInterval], String)] = {
-    prepareCoverageSamples(bamLocation).map( p =>
-      p._1.filter($"coverage" > coverageThreshold).drop("coverage").as[SimpleInterval] -> p._2
-    )
-  }
 
-  def prepareCoverageSamples(bamLocation: String): List[(Dataset[SimpleInterval], String)] = {
+  def prepareCoverageSamples(bamLocation: String): List[(String, Dataset[SimpleInterval])] = {
     sequila.sql(s"create database if not exists $DB_NAME")
     sequila.sql(s"use $DB_NAME")
     sequila.sql(s"drop table if exists $BAM_TABLE_NAME")
     sequila.sql(s"create table $BAM_TABLE_NAME USING org.biodatageeks.datasources.BAM.BAMDataSource OPTIONS(path '$bamLocation')")
     val sampleIdList = sequila.table(BAM_TABLE_NAME).select("sampleId").distinct().as[String].collect()
     sampleIdList.map(sampleName =>
-      (sequila.sql(s"select * from bdg_coverage('$BAM_TABLE_NAME','$sampleName', 'blocks')").
-        select(withChrPrefix($"contigName").as("contigName"), $"start", $"end").as[SimpleInterval], sampleName)
+      sampleName -> sequila.sql(s"select * from bdg_coverage('$BAM_TABLE_NAME','$sampleName', 'blocks')").
+        select(withChrPrefix($"contigName").as("contigName"), $"start", $"end").as[SimpleInterval]
     ).toList
   }
 
   def prepareGeneDS(gtfLocation: String): Dataset[Gene] = {
     logger.debug("Loading gene data")
-    val gtfSchema = StructType(Array(
-      StructField("seqname", StringType, nullable = false), StructField("source", StringType, nullable = false),
-      StructField("feature", StringType, nullable = false), StructField("start", IntegerType, nullable = false),
-      StructField("end", IntegerType, nullable = false), StructField("score", StringType, nullable = false),
-      StructField("strand", StringType, nullable = false), StructField("frame", StringType, nullable = false),
-      StructField("attributes", StringType, nullable = false)
-    ))
-    val geneIdExpression = regexp_extract($"attributes", """.*gene_id\s"([^"]+)";""", 1).as("geneId")
-    val geneDS = sequila.read.option("sep", "\t").option("comment", "#").schema(gtfSchema).csv(gtfLocation).
-      select("seqname", "feature", "start", "end", "strand", "attributes").
-      filter($"feature" === "gene")
-      .select(withChrPrefix($"seqname").as("contigName"), $"start", $"end", $"strand", geneIdExpression)
-      .as[Gene].cache()
-    logDiagnosticInfo(geneDS, "genes")
-    geneDS
+    val geneIdExpression = (attrsColumn: Column) =>
+      regexp_extract(attrsColumn, """.*gene_id\s"([^"]+)";""", 1).as("geneId")
+    loadGtf(gtfLocation, "gene", geneIdExpression).as[Gene]
   }
 
   def prepareExonDS(gtfLocation: String): DataFrame = {
-    // TODO: DRY
     logger.debug("Loading exon data")
+    val geneIdExpression = (attrsColumn: Column) =>
+      regexp_extract(attrsColumn, """.*gene_id\s"([^"]+)";""", 1).as("geneId")
+    val exonIdExpression = (attrsColumn: Column) =>
+      regexp_extract(attrsColumn, """.*exon_id\s"([^"]+)";""", 1).as("exonId")
+    loadGtf(gtfLocation, "exon", geneIdExpression, exonIdExpression)
+  }
+
+  def loadGtf(gtfLocation: String, featureType: String, attributeExpressions: (Column => Column)*): DataFrame = {
     val gtfSchema = StructType(Array(
       StructField("seqname", StringType, nullable = false), StructField("source", StringType, nullable = false),
       StructField("feature", StringType, nullable = false), StructField("start", IntegerType, nullable = false),
@@ -183,20 +172,18 @@ class IntervalProcessor(outputDirectory: Path) {
       StructField("strand", StringType, nullable = false), StructField("frame", StringType, nullable = false),
       StructField("attributes", StringType, nullable = false)
     ))
-    val geneIdExpression = regexp_extract($"attributes", """.*gene_id\s"([^"]+)";""", 1).as("geneId")
-    val exonIdExpression = regexp_extract($"attributes",  """.*exon_id\s"([^"]+)";""", 1).as("exonId")
-    val exonDS = sequila.read.option("sep", "\t").option("comment", "#").schema(gtfSchema).csv(gtfLocation).
+    val resultColumns = Array(withChrPrefix($"seqname").as("contigName"),
+      $"start", $"end", $"strand") ++ attributeExpressions.map(_.apply($"attributes"))
+    val gtfDF = sequila.read.option("sep", "\t").option("comment", "#").schema(gtfSchema).csv(gtfLocation).
       select("seqname", "feature", "start", "end", "strand", "attributes").
-      filter($"feature" === "exon").
-      select(withChrPrefix($"seqname").as("contigName"), $"start", $"end", $"strand",
-        geneIdExpression, exonIdExpression).cache()
-    logDiagnosticInfo(exonDS, "exons")
-    exonDS
+      filter($"feature" === featureType).
+      select(resultColumns: _*)
+    gtfDF
   }
 
-  def prepareGeneLengthDF(exonDS: Dataset[SimpleInterval]): DataFrame = {
-    val geneLengthDF = exonDS.groupBy($"geneId").agg(sum($"end" - $"start").as("exonLengthSum")).cache
-    logDiagnosticInfo(geneLengthDF, "gene_length")
+  def prepareExonLengthDF(exonDS: Dataset[SimpleInterval]): DataFrame = {
+    val geneLengthDF = exonDS.groupBy($"exonId").agg(first($"geneId").as("geneId"),
+      first($"end" - $"start").as("exonLengthSum"))
     geneLengthDF
   }
 
@@ -227,12 +214,12 @@ class IntervalProcessor(outputDirectory: Path) {
     lowGeneCoverageDS
   }
 
-  def filterEntirelyCoveredIntervals(coverageIntervalsDS: Dataset[_ <: ContigInterval],
+  def filterEntirelyCoveredIntervals(coverageIntervalsDF: DataFrame,
                                      intervalComplexId: String*): DataFrame = {
     logger.debug("Filtering entirely covered intervals")
     val aggKeyColumns = intervalComplexId.map(col)
 
-    coverageIntervalsDS.groupBy(aggKeyColumns: _*).agg(
+    coverageIntervalsDF.groupBy(aggKeyColumns: _*).agg(
       first($"start").as("start"), first($"end").as("end"), first($"intervalLength").as("intervalLength"),
       sum($"end" - $"start").cast(IntegerType).as("coverageLength")).
       filter($"intervalLength" === $"coverageLength")
@@ -242,19 +229,22 @@ class IntervalProcessor(outputDirectory: Path) {
     def mappabilityIntervals = loadBigWig(mappabilityPath)
 
     logger.debug("Filtering mappability data")
+
     def selectedIntervals = mappabilityIntervals.filter(a => a.score >= mappabilityThreshold)
+
     logger.debug("Finished filtering mappability")
 
     logger.debug("Merging mappability intervals")
+
     def mergedIntervals = mergeIntervals(selectedIntervals.iterator).map {
       case interval: SimpleInterval => interval
       case interval: ContigInterval => SimpleInterval(interval.contigName, interval.start, interval.end)
     }.toSeq
+
     logger.debug("Finished merging mappability intervals")
 
     logger.debug("Distributing mappability data across the cluster")
-    val mappabilityDS = sequila.sparkContext.parallelize(mergedIntervals).toDS.cache()
-    logDiagnosticInfo(mappabilityDS, "mappability")
+    val mappabilityDS = sequila.sparkContext.parallelize(mergedIntervals).toDS
     mappabilityDS
   }
 
@@ -272,8 +262,7 @@ class IntervalProcessor(outputDirectory: Path) {
 
   def loadBaits(baitsLocation: String): Dataset[SimpleInterval] = {
     logger.debug("Loading baits data")
-    val baitsDS = loadBed(baitsLocation).cache()
-    logDiagnosticInfo(baitsDS, "baits")
+    val baitsDS = loadBed(baitsLocation)
     baitsDS
   }
 
@@ -282,8 +271,8 @@ class IntervalProcessor(outputDirectory: Path) {
     val bedSchema = StructType(Array(
       StructField("contigName", StringType, nullable = false), StructField("start", IntegerType, nullable = false),
       StructField("end", IntegerType, nullable = false)))
-
-    sequila.read.option("sep", "\t").schema(bedSchema).csv(bedLocation).as[SimpleInterval]
+    sequila.read.option("sep", "\t").schema(bedSchema).csv(bedLocation).select($"start", $"end",
+      withChrPrefix($"contigName").as("contigName")).as[SimpleInterval]
   }
 
   def rangeJoin(firstDS: Dataset[_ <: ContigInterval], secondDS: Dataset[_ <: ContigInterval]): DataFrame = {
