@@ -78,7 +78,8 @@ class IntervalProcessor(outputDirectory: Path) {
   def mergeIntervals(intervals: Iterator[_ <: ContigInterval]): Iterator[SimpleInterval] = {
     intervals.foldLeft(List[SimpleInterval]())((acc, interval) => {
       val previousInterval = acc.headOption
-      if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
+      if (previousInterval.isDefined && previousInterval.get.contigName == interval.contigName &&
+        previousInterval.get.end + 1 == interval.start) {
         SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
       } else {
         val simpleInterval = interval match {
@@ -95,14 +96,11 @@ class IntervalProcessor(outputDirectory: Path) {
     intervalDS.mapPartitions(part => {
       part.foldLeft(List[SimpleInterval]())((acc, interval) => {
         val previousInterval = acc.headOption
-        if (previousInterval.isDefined && previousInterval.get.end + 1 == interval.start) {
+        if (previousInterval.isDefined && previousInterval.get.contigName == interval.contigName &&
+          previousInterval.get.end + 1 == interval.start) {
           SimpleInterval(interval.contigName, previousInterval.get.start, interval.end) :: acc.tail
         } else {
-          val simpleInterval = interval match {
-            case SimpleInterval(_, _, _) => interval.asInstanceOf[SimpleInterval]
-            case other => SimpleInterval(other.contigName, other.start, other.end)
-          }
-          simpleInterval :: acc
+          interval :: acc
         }
       }).reverseIterator
     })
@@ -155,13 +153,15 @@ class IntervalProcessor(outputDirectory: Path) {
     loadGtf(gtfLocation, "gene", geneIdExpression).as[Gene]
   }
 
-  def prepareExonDS(gtfLocation: String): DataFrame = {
+  def prepareExonDF(gtfLocation: String): DataFrame = {
     logger.debug("Loading exon data")
     val geneIdExpression = (attrsColumn: Column) =>
       regexp_extract(attrsColumn, """.*gene_id\s"([^"]+)";""", 1).as("geneId")
     val exonIdExpression = (attrsColumn: Column) =>
       regexp_extract(attrsColumn, """.*exon_id\s"([^"]+)";""", 1).as("exonId")
-    loadGtf(gtfLocation, "exon", geneIdExpression, exonIdExpression)
+    val transcriptIdExpression = (attrsColumn: Column) =>
+      regexp_extract(attrsColumn, """.*transcript_id\s"([^"]+)";""", 1).as("transcriptId")
+    loadGtf(gtfLocation, "exon", geneIdExpression, exonIdExpression, transcriptIdExpression)
   }
 
   def loadGtf(gtfLocation: String, featureType: String, attributeExpressions: (Column => Column)*): DataFrame = {
@@ -230,7 +230,7 @@ class IntervalProcessor(outputDirectory: Path) {
 
     logger.debug("Filtering mappability data")
 
-    def selectedIntervals = mappabilityIntervals.filter(a => a.score >= mappabilityThreshold)
+    def selectedIntervals = mappabilityIntervals.filter(a => a.score < mappabilityThreshold)
 
     logger.debug("Finished filtering mappability")
 

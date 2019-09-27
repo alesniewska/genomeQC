@@ -26,7 +26,6 @@ class ResultWriter(processor: IntervalProcessor) {
     val tempPath = outputPath.resolve("temp")
     val coverageOnSinglePartition = coverageDS.orderBy("contigName", "start").coalesce(1)
     processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t").csv(tempPath.toString)
-
   }
 
   def writeGeneSummary(geneList: DataFrame, outputPath: Path): Unit = {
@@ -35,9 +34,9 @@ class ResultWriter(processor: IntervalProcessor) {
       write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
   }
 
-  def writeGeneExonSummary(geneList: DataFrame, outputPath: Path): Unit = {
+  def writeExonSummary(geneList: DataFrame, outputPath: Path): Unit = {
     geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"), $"exonId".as("exon"),
-      ($"exonCoverageLength" / $"exonLengthSum").as("exon_coverage")).coalesce(1).
-      write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
+      $"transcriptId".as("transcript"), ($"exonCoverageLength" / $"exonLengthSum").as("exon_coverage")).
+      coalesce(1).write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
   }
 }

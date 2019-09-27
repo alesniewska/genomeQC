@@ -18,11 +18,9 @@ object ExonSummaryMain {
 
     val highCoverageDS = processor.prepareJoinedHighCoverageDS(bamLocation, coverageThreshold)
 
-    val exonDS = processor.prepareExonDS(gtfLocation).
+    val exonDS = processor.prepareExonDF(gtfLocation).
       withColumn("intervalLength", $"end" - $"start").as[SimpleInterval]
     val exonCoverageIntersectionDF = processor.rangeJoin(highCoverageDS, exonDS).persist(StorageLevel.DISK_ONLY)
-    processor.writeCoverageStrandedRegions(exonCoverageIntersectionDF.as[StrandedInterval],
-      (strand: String) => outputDirectory.resolve(s"exons_${strand}_high_coverage"))
     val entirelyHighCoveredExons = processor.filterEntirelyCoveredIntervals(exonCoverageIntersectionDF,
       "exonId", "contigName", "strand").as[StrandedInterval]
     processor.writeCoverageStrandedRegions(entirelyHighCoveredExons,
@@ -30,9 +28,9 @@ object ExonSummaryMain {
 
     val exonLengthDF = processor.prepareExonLengthDF(exonDS)
 
-    val exonCoverageRatios = exonCoverageIntersectionDF.groupBy("exonId", "contigName", "strand").agg(
+    val exonCoverageRatios = exonCoverageIntersectionDF.groupBy("transcriptId", "exonId", "contigName", "strand").agg(
       sum($"end" - $"start").as("exonCoverageLength")).join(exonLengthDF, "exonId")
 
-    processor.resultWriter.writeGeneExonSummary(exonCoverageRatios, outputDirectory.resolve("exon_gene_summary.csv"))
+    processor.resultWriter.writeExonSummary(exonCoverageRatios, outputDirectory.resolve("exon_summary.csv"))
   }
 }
