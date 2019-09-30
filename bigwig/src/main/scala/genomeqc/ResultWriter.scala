@@ -3,7 +3,8 @@ package genomeqc
 import java.nio.file.Path
 
 import genomeqc.model.{SimpleInterval, StrandedInterval}
-import org.apache.spark.sql.{DataFrame, Dataset}
+import org.apache.commons.io.FileUtils
+import org.apache.spark.sql.{DataFrame, DataFrameWriter, Dataset}
 
 class ResultWriter(processor: IntervalProcessor) {
 
@@ -23,20 +24,31 @@ class ResultWriter(processor: IntervalProcessor) {
   }
 
   def writeResultToBedFile(coverageDS: Dataset[SimpleInterval], outputPath: Path): Unit = {
-    val tempPath = outputPath.resolve("temp")
     val coverageOnSinglePartition = coverageDS.orderBy("contigName", "start").coalesce(1)
-    processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t").csv(tempPath.toString)
+    val dfWriter = processor.mergeIntervalsOnPartition(coverageOnSinglePartition).write.option("sep", "\t")
+    writeCsvToSingleFile(dfWriter, outputPath)
   }
 
   def writeGeneSummary(geneList: DataFrame, outputPath: Path): Unit = {
-    geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"),
+    val dfWriter = geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"),
       ($"lowCoverageLength" / $"geneLength").as("gene_coverage")).coalesce(1).
-      write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
+      write.option("sep", ",").option("header", value = true)
+    writeCsvToSingleFile(dfWriter, outputPath)
   }
 
   def writeExonSummary(geneList: DataFrame, outputPath: Path): Unit = {
-    geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"), $"exonId".as("exon"),
+    val dfWriter = geneList.select($"contigName".as("chromosome"), $"strand", $"geneId".as("gene"), $"exonId".as("exon"),
       $"transcriptId".as("transcript"), ($"exonCoverageLength" / $"exonLengthSum").as("exon_coverage")).
-      coalesce(1).write.option("sep", ",").option("header", value = true).csv(outputPath.toString)
+      coalesce(1).write.option("sep", ",").option("header", value = true)
+    writeCsvToSingleFile(dfWriter, outputPath)
+  }
+
+  private def writeCsvToSingleFile[T](dfWriter: DataFrameWriter[T], outputPath: Path): Unit = {
+    val tempDir = outputPath.getParent.resolve(outputPath.getFileName + ".tmp")
+    dfWriter.csv(tempDir.toString)
+    val partName = tempDir.toFile.list.filter(name => name.startsWith("part") && name.endsWith(".csv")).head
+    val partPath = tempDir.resolve(partName)
+    partPath.toFile.renameTo(outputPath.toFile)
+    FileUtils.deleteDirectory(tempDir.toFile)
   }
 }

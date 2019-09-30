@@ -1,4 +1,4 @@
-name := "bigwig-generator"
+name := "genomeqc"
 
 version := "0.1"
 
